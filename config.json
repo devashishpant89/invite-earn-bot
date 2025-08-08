@@ -1,0 +1,9 @@
+{
+  "token": "YOUR_DISCORD_BOT_TOKEN",
+  "mongoUri": "YOUR_MONGODB_URI",
+  "channels": {
+    "referralPanel": "REFERRAL_PANEL_CHANNEL_ID",
+    "leaderboard": "LEADERBOARD_CHANNEL_ID"
+  },
+  "adminRoleId": "YOUR_ADMIN_ROLE_ID"
+}

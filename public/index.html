@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Invite & Earn Admin Panel</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <h1>Invite & Earn Admin Panel</h1>
+
+  <div id="user-form">
+    <input type="text" id="userId" placeholder="Enter User ID" />
+    <button id="fetchUserBtn">Fetch User Stats</button>
+  </div>
+
+  <div id="user-stats" style="display:none;">
+    <h2>User Stats</h2>
+    <p><strong>User ID:</strong> <span id="statUserId"></span></p>
+    <p><strong>Invites:</strong> <span id="statInvites"></span></p>
+    <p><strong>Bonus:</strong> $<span id="statBonus"></span></p>
+    <p><strong>Total Earnings:</strong> $<span id="statEarnings"></span></p>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
