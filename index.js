@@ -18,23 +18,23 @@ const client = new Client({
 });
 
 // ─── Models, cache & helpers ───────────────────────────────────────────────────
-const User    = require('./models/User');
+const User = require('./models/User');
 const invites = new Map();
 
-client.config   = config;
+client.config = config;
 client.commands = new Collection();
 
 // ─── Load slash / context commands ─────────────────────────────────────────────
-const commandsPath  = path.join(__dirname, 'commands');
-const commandFiles  = fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'));
+const commandsPath = path.join(__dirname, 'commands');
+const commandFiles = fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'));
 for (const file of commandFiles) {
   const cmd = require(path.join(commandsPath, file));
   if (cmd.data) client.commands.set(cmd.data.name, cmd);
 }
 
 // ─── Get token & Mongo URI from ENV or fallback to config.json ─────────────────
-const token    = process.env.BOT_TOKEN || config.token;
-const mongoUri = process.env.MONGO_URI  || config.mongoUri;
+const token = process.env.BOT_TOKEN || config.token;
+const mongoUri = process.env.MONGO_URI || config.mongoUri;
 
 // ─── MongoDB ───────────────────────────────────────────────────────────────────
 mongoose.connect(mongoUri, {
@@ -61,9 +61,9 @@ client.once('ready', async () => {
 // ─── Track invite usage on member join ─────────────────────────────────────────
 client.on('guildMemberAdd', async member => {
   try {
-    const cached   = client.inviteCache.get(member.guild.id) || new Map();
+    const cached = client.inviteCache.get(member.guild.id) || new Map();
     const newState = await member.guild.invites.fetch();
-    const used     = newState.find(i => (cached.get(i.code) || 0) < i.uses);
+    const used = newState.find(i => (cached.get(i.code) || 0) < i.uses);
 
     // refresh cache
     client.inviteCache.set(member.guild.id, new Map(newState.map(i => [i.code, i.uses])));
@@ -73,7 +73,7 @@ client.on('guildMemberAdd', async member => {
     const inviterId = used.inviter.id;
     const doc = await User.findOneAndUpdate(
       { userId: inviterId },
-      { 
+      {
         $inc: { invites: 1 },
         $set: { username: used.inviter.tag }
       },
@@ -86,6 +86,18 @@ client.on('guildMemberAdd', async member => {
     }
     console.log(`+1 invite for ${used.inviter.tag}`);
   } catch (e) { console.error('Invite track error:', e); }
+});
+
+// ─── Remove user data on member leave ──────────────────────────────────────────
+client.on('guildMemberRemove', async member => {
+  try {
+    const res = await User.deleteOne({ userId: member.id });
+    if (res.deletedCount > 0) {
+      console.log(`Removed data for ${member.user.tag} from the database (left server).`);
+    }
+  } catch (e) {
+    console.error('Error removing user data on leave:', e);
+  }
 });
 
 // ─── Interaction handler ───────────────────────────────────────────────────────
