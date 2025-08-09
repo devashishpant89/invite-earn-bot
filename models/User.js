@@ -4,9 +4,8 @@ const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config.json');
-const User = require('./models/User'); // ← your posted user.js
 
-// ─── Discord Client ─────────────────────────────────────────────
+// ─── Discord client ────────────────────────────────────────────────────────────
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -18,33 +17,38 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-client.config = config;
+// ─── Models, cache & helpers ───────────────────────────────────────────────────
+const User    = require('./models/User');
+const invites = new Map();
+
+client.config   = config;
 client.commands = new Collection();
 
-// ─── Load Commands ─────────────────────────────────────────────
-const commandsPath = path.join(__dirname, 'commands');
-const commandFiles = fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'));
+// ─── Load slash / context commands ─────────────────────────────────────────────
+const commandsPath  = path.join(__dirname, 'commands');
+const commandFiles  = fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'));
 for (const file of commandFiles) {
   const cmd = require(path.join(commandsPath, file));
   if (cmd.data) client.commands.set(cmd.data.name, cmd);
 }
 
-// ─── ENV vars or config fallback ───────────────────────────────
-const token = process.env.BOT_TOKEN || config.token;
-const mongoUri = process.env.MONGO_URI || config.mongoUri;
+// ─── Get token & Mongo URI from ENV or fallback to config.json ─────────────────
+const token    = process.env.BOT_TOKEN || config.token;
+const mongoUri = process.env.MONGO_URI  || config.mongoUri;
 
-// ─── Connect MongoDB ───────────────────────────────────────────
+// ─── MongoDB ───────────────────────────────────────────────────────────────────
 mongoose.connect(mongoUri, {
   useNewUrlParser: true,
-  useUnifiedTopology: true
+  useUnifiedTopology: true,
 })
   .then(() => console.log('Connected to MongoDB'))
   .catch(console.error);
 
-// ─── Bot Ready Event ───────────────────────────────────────────
+// ─── Ready: cache invites ──────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
+  // cache all invites as Map<code, uses>
   client.inviteCache = new Map();
   for (const g of client.guilds.cache.values()) {
     const allInv = await g.invites.fetch().catch(() => null);
@@ -54,82 +58,43 @@ client.once('ready', async () => {
   console.log('Invite cache primed.');
 });
 
-// ─── Member Join Event ─────────────────────────────────────────
+// ─── Track invite usage on member join ─────────────────────────────────────────
 client.on('guildMemberAdd', async member => {
   try {
-    // Get used invite
-    const cached = client.inviteCache.get(member.guild.id) || new Map();
+    const cached   = client.inviteCache.get(member.guild.id) || new Map();
     const newState = await member.guild.invites.fetch();
-    const used = newState.find(i => (cached.get(i.code) || 0) < i.uses);
+    const used     = newState.find(i => (cached.get(i.code) || 0) < i.uses);
 
-    // Refresh cache
+    // refresh cache
     client.inviteCache.set(member.guild.id, new Map(newState.map(i => [i.code, i.uses])));
 
     if (!used?.inviter) return;
 
     const inviterId = used.inviter.id;
-
-    // Save invited member record (so we know who invited them later)
-    await User.findOneAndUpdate(
-      { userId: member.id },
-      { userId: member.id, inviterId, bonus: 0 }, 
-      { upsert: true }
-    );
-
-    // Increment inviter's invites & recalc earnings
-    const inviterDoc = await User.findOneAndUpdate(
+    const doc = await User.findOneAndUpdate(
       { userId: inviterId },
-      { $inc: { invites: 1 } },
+      { 
+        $inc: { invites: 1 },
+        $set: { username: used.inviter.tag }
+      },
       { upsert: true, new: true }
     );
 
-    if (inviterDoc) {
-      inviterDoc.totalEarnings = inviterDoc.calculateTotalEarnings();
-      await inviterDoc.save();
+    if (doc) {
+      doc.calculateTotalEarnings();
+      await doc.save();
     }
-
-    console.log(`+1 invite for ${used.inviter.tag} (invited ${member.user.tag})`);
-  } catch (err) {
-    console.error('Invite track error:', err);
-  }
+    console.log(`+1 invite for ${used.inviter.tag}`);
+  } catch (e) { console.error('Invite track error:', e); }
 });
 
-// ─── Member Leave Event ────────────────────────────────────────
-client.on('guildMemberRemove', async member => {
-  try {
-    const leavingUser = await User.findOne({ userId: member.id });
-    if (!leavingUser) return;
-
-    const inviterId = leavingUser.inviterId;
-    if (inviterId) {
-      const inviterDoc = await User.findOneAndUpdate(
-        { userId: inviterId },
-        { $inc: { invites: -1 } },
-        { new: true }
-      );
-
-      if (inviterDoc) {
-        inviterDoc.totalEarnings = inviterDoc.calculateTotalEarnings();
-        await inviterDoc.save();
-        console.log(`-1 invite (-$0.50) for inviter ${inviterDoc.userId} due to ${member.user.tag} leaving`);
-      }
-    }
-
-    await User.deleteOne({ userId: member.id });
-    console.log(`Removed ${member.user.tag} from DB.`);
-  } catch (err) {
-    console.error('Error handling member leave:', err);
-  }
-});
-
-// ─── Interaction Handler ───────────────────────────────────────
+// ─── Interaction handler ───────────────────────────────────────────────────────
 client.on('interactionCreate', async int => {
   if (int.isChatInputCommand()) {
     const cmd = client.commands.get(int.commandName);
     if (!cmd) return;
-    try {
-      await cmd.execute(int);
-    } catch (e) {
+    try { await cmd.execute(int); }
+    catch (e) {
       console.error(e);
       await int.reply({ content: 'Command error.', ephemeral: true });
     }
@@ -144,5 +109,5 @@ client.on('interactionCreate', async int => {
   }
 });
 
-// ─── Login ─────────────────────────────────────────────────────
+// ─── Login ─────────────────────────────────────────────────────────────────────
 client.login(token);
