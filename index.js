@@ -32,12 +32,19 @@ for (const file of commandFiles) {
   if (cmd.data) client.commands.set(cmd.data.name, cmd);
 }
 
+// ─── Get token & Mongo URI from ENV or fallback to config.json ─────────────────
+const token    = process.env.BOT_TOKEN || config.token;
+const mongoUri = process.env.MONGO_URI  || config.mongoUri;
+
 // ─── MongoDB ───────────────────────────────────────────────────────────────────
-mongoose.connect(config.mongoUri)
+mongoose.connect(mongoUri, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
   .then(() => console.log('Connected to MongoDB'))
   .catch(console.error);
 
-// ─── Ready: cache invites & set up panels ──────────────────────────────────────
+// ─── Ready: cache invites ──────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
@@ -73,8 +80,10 @@ client.on('guildMemberAdd', async member => {
       { upsert: true, new: true }
     );
 
-    doc.calculateTotalEarnings();
-    await doc.save();
+    if (doc) {
+      doc.calculateTotalEarnings();
+      await doc.save();
+    }
     console.log(`+1 invite for ${used.inviter.tag}`);
   } catch (e) { console.error('Invite track error:', e); }
 });
@@ -101,4 +110,4 @@ client.on('interactionCreate', async int => {
 });
 
 // ─── Login ─────────────────────────────────────────────────────────────────────
-client.login(config.token);
+client.login(token);
