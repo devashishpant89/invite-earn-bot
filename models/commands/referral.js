@@ -24,6 +24,10 @@ function createLeaderboardEmbed(users, page, totalPages) {
     description += `${medal} ${userData.username}\nInvites: ${userData.invites}\nBonus: $${userData.bonus.toFixed(2)}\n💰 Total Earnings: $${userData.totalEarnings.toFixed(2)}\n\n`;
   });
 
+  if (!description || description.trim().length === 0) {
+    description = 'No leaderboard data available.'; // or a custom, helpful message
+  }
+
   return new EmbedBuilder()
     .setTitle('REWARD NETWORK | INVITE LEADERBOARD')
     .setColor('Green')
@@ -82,7 +86,7 @@ module.exports = {
         await interaction.reply({ content: `Your unique invite link:\n${userInvite.url}`, ephemeral: true });
 
         setTimeout(() => {
-          interaction.deleteReply().catch(() => {});
+          interaction.deleteReply().catch(() => { });
         }, 20000);
 
       } catch (error) {
@@ -102,7 +106,7 @@ module.exports = {
 
       await interaction.reply({ embeds: [embed], ephemeral: true });
       setTimeout(() => {
-        interaction.deleteReply().catch(() => {});
+        interaction.deleteReply().catch(() => { });
       }, 20000);
 
     } else if (['leaderboard_prev', 'leaderboard_next', 'leaderboard_refresh'].includes(interaction.customId)) {
