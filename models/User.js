@@ -4,8 +4,9 @@ const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config.json');
+const User = require('./models/User'); // your posted user.js
 
-// ─── Discord client ────────────────────────────────────────────────────────────
+// ─── Discord Client ─────────────────────────────────────────────
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -17,38 +18,33 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-// ─── Models, cache & helpers ───────────────────────────────────────────────────
-const User    = require('./models/User');
-const invites = new Map();
-
-client.config   = config;
+client.config = config;
 client.commands = new Collection();
 
-// ─── Load slash / context commands ─────────────────────────────────────────────
-const commandsPath  = path.join(__dirname, 'commands');
-const commandFiles  = fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'));
+// ─── Load Commands ─────────────────────────────────────────────
+const commandsPath = path.join(__dirname, 'commands');
+const commandFiles = fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'));
 for (const file of commandFiles) {
   const cmd = require(path.join(commandsPath, file));
   if (cmd.data) client.commands.set(cmd.data.name, cmd);
 }
 
-// ─── Get token & Mongo URI from ENV or fallback to config.json ─────────────────
-const token    = process.env.BOT_TOKEN || config.token;
-const mongoUri = process.env.MONGO_URI  || config.mongoUri;
+// ─── ENV vars or config fallback ───────────────────────────────
+const token = process.env.BOT_TOKEN || config.token;
+const mongoUri = process.env.MONGO_URI || config.mongoUri;
 
-// ─── MongoDB ───────────────────────────────────────────────────────────────────
+// ─── Connect MongoDB ───────────────────────────────────────────
 mongoose.connect(mongoUri, {
   useNewUrlParser: true,
-  useUnifiedTopology: true,
+  useUnifiedTopology: true
 })
   .then(() => console.log('Connected to MongoDB'))
   .catch(console.error);
 
-// ─── Ready: cache invites ──────────────────────────────────────────────────────
+// ─── Bot Ready Event ───────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  // cache all invites as Map<code, uses>
   client.inviteCache = new Map();
   for (const g of client.guilds.cache.values()) {
     const allInv = await g.invites.fetch().catch(() => null);
@@ -58,43 +54,91 @@ client.once('ready', async () => {
   console.log('Invite cache primed.');
 });
 
-// ─── Track invite usage on member join ─────────────────────────────────────────
+// ─── Member Join Event ─────────────────────────────────────────
 client.on('guildMemberAdd', async member => {
   try {
-    const cached   = client.inviteCache.get(member.guild.id) || new Map();
+    const cached = client.inviteCache.get(member.guild.id) || new Map();
     const newState = await member.guild.invites.fetch();
-    const used     = newState.find(i => (cached.get(i.code) || 0) < i.uses);
+    const used = newState.find(i => (cached.get(i.code) || 0) < i.uses);
 
-    // refresh cache
+    // Refresh cache
     client.inviteCache.set(member.guild.id, new Map(newState.map(i => [i.code, i.uses])));
 
-    if (!used?.inviter) return;
+    if (!used?.inviter) {
+      console.log(`${member.user.tag} joined but no inviter found`);
+      return;
+    }
 
     const inviterId = used.inviter.id;
-    const doc = await User.findOneAndUpdate(
+
+    // Save joining member’s inviterId
+    await User.findOneAndUpdate(
+      { userId: member.id },
+      { userId: member.id, inviterId, bonus: 0 },
+      { upsert: true }
+    );
+
+    // Increment inviter's invites
+    const inviterDoc = await User.findOneAndUpdate(
       { userId: inviterId },
-      { 
-        $inc: { invites: 1 },
-        $set: { username: used.inviter.tag }
-      },
+      { $inc: { invites: 1 } },
       { upsert: true, new: true }
     );
 
-    if (doc) {
-      doc.calculateTotalEarnings();
-      await doc.save();
+    if (inviterDoc) {
+      inviterDoc.totalEarnings = inviterDoc.calculateTotalEarnings();
+      await inviterDoc.save();
+      console.log(`+1 invite for ${used.inviter.tag} → Invites: ${inviterDoc.invites}, Earnings: $${inviterDoc.totalEarnings.toFixed(2)}`);
     }
-    console.log(`+1 invite for ${used.inviter.tag}`);
-  } catch (e) { console.error('Invite track error:', e); }
+
+  } catch (err) {
+    console.error('Invite track error:', err);
+  }
 });
 
-// ─── Interaction handler ───────────────────────────────────────────────────────
+// ─── Member Leave Event ────────────────────────────────────────
+client.on('guildMemberRemove', async member => {
+  try {
+    console.log(`${member.user.tag} has left the server.`);
+
+    const leavingUser = await User.findOne({ userId: member.id });
+    if (!leavingUser) {
+      console.log('No DB record for leaving member.');
+      return;
+    }
+
+    const inviterId = leavingUser.inviterId;
+    if (inviterId) {
+      const inviterDoc = await User.findOne({ userId: inviterId });
+      if (inviterDoc) {
+        inviterDoc.invites = Math.max(0, inviterDoc.invites - 1); // prevent negative
+        inviterDoc.totalEarnings = inviterDoc.calculateTotalEarnings();
+        await inviterDoc.save();
+        console.log(`-1 invite for inviter ${inviterDoc.userId} → Invites: ${inviterDoc.invites}, Earnings: $${inviterDoc.totalEarnings.toFixed(2)}`);
+      } else {
+        console.log(`Inviter ${inviterId} not found in DB`);
+      }
+    } else {
+      console.log(`No inviterId stored for ${member.user.tag}`);
+    }
+
+    // Remove leaving user’s DB record
+    await User.deleteOne({ userId: member.id });
+    console.log(`Removed DB record for ${member.user.tag}`);
+
+  } catch (err) {
+    console.error('Error handling member leave:', err);
+  }
+});
+
+// ─── Interaction Handler ───────────────────────────────────────
 client.on('interactionCreate', async int => {
   if (int.isChatInputCommand()) {
     const cmd = client.commands.get(int.commandName);
     if (!cmd) return;
-    try { await cmd.execute(int); }
-    catch (e) {
+    try {
+      await cmd.execute(int);
+    } catch (e) {
       console.error(e);
       await int.reply({ content: 'Command error.', ephemeral: true });
     }
@@ -109,5 +153,27 @@ client.on('interactionCreate', async int => {
   }
 });
 
-// ─── Login ─────────────────────────────────────────────────────────────────────
+// ─── Login ─────────────────────────────────────────────────────
 client.login(token);
+
+// User Schema for MongoDB
+const userSchema = new mongoose.Schema({
+  userId: { type: String, required: true, unique: true },
+  inviterId: { type: String, default: null },
+  invites: { type: Number, default: 0 },
+  bonus: { type: Number, default: 0 },
+  username: { type: String, default: '' }
+});
+
+// Calculate total earnings (invites * 0.5 + bonus)
+userSchema.methods.calculateTotalEarnings = function () {
+  this.totalEarnings = this.invites * 0.5 + this.bonus;
+  return this.totalEarnings;
+};
+
+// Virtual for totalEarnings
+userSchema.virtual('totalEarnings').get(function () {
+  return this.invites * 0.5 + this.bonus;
+});
+
+module.exports = mongoose.model('User', userSchema);
