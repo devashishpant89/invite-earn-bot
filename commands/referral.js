@@ -10,7 +10,8 @@ function createReferralEmbed(userData) {
     .setDescription(`Total Valid Invites: ${userData.invites}\nBonus: $${userData.bonus.toFixed(2)}\n💰 Total Earnings: $${userData.totalEarnings.toFixed(2)}`);
 }
 
-function createLeaderboardEmbed(users, page, totalPages) {
+// ✅ Make it async to fetch usernames from Discord API
+async function createLeaderboardEmbed(users, page, totalPages, client) {
   let description = '';
   const start = (page - 1) * ITEMS_PER_PAGE;
   const end = start + ITEMS_PER_PAGE;
@@ -18,14 +19,19 @@ function createLeaderboardEmbed(users, page, totalPages) {
 
   const medals = ['🥇', '🥈', '🥉'];
 
-  pageUsers.forEach((userData, index) => {
+  for (const [index, userData] of pageUsers.entries()) {
     const rank = start + index + 1;
-    const medal = medals[index] || rank + '.';
-    description += `${medal} ${userData.username}\nInvites: ${userData.invites}\nBonus: $${userData.bonus.toFixed(2)}\n💰 Total Earnings: $${userData.totalEarnings.toFixed(2)}\n\n`;
-  });
+    const medal = medals[index] || `${rank}.`;
 
-  if (!description || description.trim().length === 0) {
-    description = 'No leaderboard data available.'; // or a custom, helpful message
+    // Fetch live username from Discord API
+    const user = await client.users.fetch(userData.userId).catch(() => null);
+    const username = user ? user.tag : (userData.username || 'Unknown#0000');
+
+    description += `${medal} ${username}\nInvites: ${userData.invites}\nBonus: $${userData.bonus.toFixed(2)}\n💰 Total Earnings: $${userData.totalEarnings.toFixed(2)}\n\n`;
+  }
+
+  if (!description.trim()) {
+    description = 'No leaderboard data available.';
   }
 
   return new EmbedBuilder()
@@ -80,13 +86,17 @@ module.exports = {
 
         let userInvite = invites.find(i => i.inviter?.id === userId);
         if (!userInvite) {
-          userInvite = await interaction.channel.createInvite({ maxAge: 0, maxUses: 0, unique: true, reason: `Invite link for ${interaction.user.tag}` });
+          userInvite = await interaction.channel.createInvite({
+            maxAge: 0,
+            maxUses: 0,
+            unique: true,
+            reason: `Invite link for ${interaction.user.tag}`
+          });
         }
 
         await interaction.reply({ content: `Your unique invite link:\n${userInvite.url}`, ephemeral: true });
-
         setTimeout(() => {
-          interaction.deleteReply().catch(() => { });
+          interaction.deleteReply().catch(() => {});
         }, 20000);
 
       } catch (error) {
@@ -95,6 +105,7 @@ module.exports = {
       }
 
     } else if (interaction.customId === 'referrals') {
+
       let userData = await User.findOne({ userId });
       if (!userData) {
         userData = new User({ userId });
@@ -103,10 +114,10 @@ module.exports = {
       userData.calculateTotalEarnings();
 
       const embed = createReferralEmbed(userData);
-
       await interaction.reply({ embeds: [embed], ephemeral: true });
+
       setTimeout(() => {
-        interaction.deleteReply().catch(() => { });
+        interaction.deleteReply().catch(() => {});
       }, 20000);
 
     } else if (['leaderboard_prev', 'leaderboard_next', 'leaderboard_refresh'].includes(interaction.customId)) {
@@ -114,7 +125,7 @@ module.exports = {
       allUsers.forEach(u => {
         u.totalEarnings = u.invites * 0.5 + u.bonus;
       });
-      const totalPages = Math.ceil(allUsers.length / ITEMS_PER_PAGE);
+      const totalPages = Math.ceil(allUsers.length / ITEMS_PER_PAGE) || 1;
 
       let page = parseInt(interaction.message.embeds[0]?.footer?.text?.match(/Page: (\d+) \/ \d+/)?.[1]) || 1;
       if (interaction.customId === 'leaderboard_prev') {
@@ -125,9 +136,8 @@ module.exports = {
         page = 1;
       }
 
-      const embed = createLeaderboardEmbed(allUsers, page, totalPages);
+      const embed = await createLeaderboardEmbed(allUsers, page, totalPages, client);
       const buttons = createLeaderboardButtons();
-
       await interaction.update({ embeds: [embed], components: [buttons] });
 
       setTimeout(async () => {
@@ -136,15 +146,14 @@ module.exports = {
         if (msg) {
           const currentPage = parseInt(msg.embeds[0]?.footer?.text?.match(/Page: (\d+) \/ \d+/)?.[1]);
           if (currentPage !== 1) {
-            const resetEmbed = createLeaderboardEmbed(allUsers, 1, totalPages);
+            const resetEmbed = await createLeaderboardEmbed(allUsers, 1, totalPages, client);
             const buttonsReset = createLeaderboardButtons();
             try {
               await msg.edit({ embeds: [resetEmbed], components: [buttonsReset] });
-            } catch { }
+            } catch {}
           }
         }
       }, 20000);
-
     }
   }
 };
