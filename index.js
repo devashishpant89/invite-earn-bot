@@ -8,6 +8,7 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 
+// ---- Discord Client ----
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -19,15 +20,17 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
+// Invite cache & DB model
+const invites = new Map();
+const User = require('./models/User');
+
+// Attach config & commands to client
 client.config = config;
 client.commands = new Collection();
 
-const User = require('./models/User');
-
-// Load commands
+// ---- Load Commands ----
 const commandsPath = path.join(__dirname, 'commands');
 const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
-
 for (const file of commandFiles) {
   const filePath = path.join(commandsPath, file);
   const command = require(filePath);
@@ -36,25 +39,31 @@ for (const file of commandFiles) {
   }
 }
 
+// ---- Connect MongoDB ----
 mongoose.connect(config.mongoUri)
   .then(() => console.log('Connected to MongoDB'))
   .catch(console.error);
 
+// ---- On Ready ----
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  // Cache invites per guild
+  // Cache invites per guild as Map<code, uses>
   client.inviteCache = new Map();
   for (const guild of client.guilds.cache.values()) {
-    const invites = await guild.invites.fetch();
-    client.inviteCache.set(guild.id, invites);
+    try {
+      const guildInvites = await guild.invites.fetch();
+      client.inviteCache.set(guild.id, new Map(guildInvites.map(inv => [inv.code, inv.uses])));
+    } catch (err) {
+      console.error(`Could not fetch invites for guild ${guild.name}:`, err);
+    }
   }
+  console.log('Initial invites cached.');
 
-  // Setup static referral panel
+  // --- Referral Panel Setup ---
   const referralChannel = client.channels.cache.get(config.channels.referralPanel);
   if (referralChannel) {
     const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
-
     let fetched = await referralChannel.messages.fetch({ limit: 10 });
     let botMessage = fetched.find(m => m.author.id === client.user.id && m.embeds.length > 0);
 
@@ -63,17 +72,10 @@ client.once('ready', async () => {
       .setDescription('Use the buttons below to get your invite link or view your referrals.')
       .setColor('Blue');
 
-    const buttons = new ActionRowBuilder()
-      .addComponents(
-        new ButtonBuilder()
-          .setCustomId('invite_link')
-          .setLabel('🎟️ Invite Link')
-          .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId('referrals')
-          .setLabel('📊 Referrals')
-          .setStyle(ButtonStyle.Secondary),
-      );
+    const buttons = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('invite_link').setLabel('🎟️ Invite Link').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('referrals').setLabel('📊 Referrals').setStyle(ButtonStyle.Secondary)
+    );
 
     if (!botMessage) {
       await referralChannel.send({ embeds: [referralEmbed], components: [buttons] });
@@ -82,34 +84,39 @@ client.once('ready', async () => {
     }
   }
 
-  // Setup leaderboard panel
+  // --- Leaderboard Panel Setup ---
   const leaderboardChannel = client.channels.cache.get(config.channels.leaderboard);
   if (leaderboardChannel) {
+    const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
     let fetched = await leaderboardChannel.messages.fetch({ limit: 10 });
     let boardMessage = fetched.find(m => m.author.id === client.user.id && m.embeds.length > 0);
-
-    const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 
     const users = await User.find({}).sort({ invites: -1 });
     users.forEach(u => u.totalEarnings = u.invites * 0.5 + u.bonus);
 
-    function createLeaderboardEmbed(users, page = 1) {
+    async function createLeaderboardEmbed(users, page = 1) {
       const ITEMS_PER_PAGE = 10;
-      let description = '';
-      const totalPages = Math.ceil(users.length / ITEMS_PER_PAGE);
+      const totalPages = Math.max(1, Math.ceil(users.length / ITEMS_PER_PAGE));
       const start = (page - 1) * ITEMS_PER_PAGE;
       const end = start + ITEMS_PER_PAGE;
       const pageUsers = users.slice(start, end);
 
       const medals = ['🥇', '🥈', '🥉'];
+      let description = '';
 
-      pageUsers.forEach((userData, index) => {
+      for (let index = 0; index < pageUsers.length; index++) {
+        const userData = pageUsers[index];
         const rank = start + index + 1;
-        const medal = medals[index] || rank + '.';
-        description += `${medal} ${userData.username || 'Unknown#0000'}\nInvites: ${userData.invites}\nBonus: $${userData.bonus.toFixed(2)}\n💰 Total Earnings: $${userData.totalEarnings.toFixed(2)}\n\n`;
-      });
+        const medal = medals[index] || `${rank}.`;
 
-      if (!description || description.trim().length === 0) {
+        // Fetch username from API or fallback to stored
+        const fetchedUser = await client.users.fetch(userData.userId).catch(() => null);
+        const username = fetchedUser ? fetchedUser.tag : (userData.username || 'Unknown#0000');
+
+        description += `${medal} ${username}\nInvites: ${userData.invites}\nBonus: $${userData.bonus.toFixed(2)}\n💰 Total Earnings: $${userData.totalEarnings.toFixed(2)}\n\n`;
+      }
+
+      if (!description.trim()) {
         description = 'No leaderboard data available.';
       }
 
@@ -120,24 +127,13 @@ client.once('ready', async () => {
         .setFooter({ text: `Page: ${page} / ${totalPages}` });
     }
 
-    const buttons = new ActionRowBuilder()
-      .addComponents(
-        new ButtonBuilder()
-          .setCustomId('leaderboard_prev')
-          .setLabel('⬅️ Previous')
-          .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId('leaderboard_next')
-          .setLabel('➡️ Next')
-          .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId('leaderboard_refresh')
-          .setLabel('🔄 Refresh')
-          .setStyle(ButtonStyle.Secondary),
-      );
+    const buttons = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('leaderboard_prev').setLabel('⬅️ Previous').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('leaderboard_next').setLabel('➡️ Next').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('leaderboard_refresh').setLabel('🔄 Refresh').setStyle(ButtonStyle.Secondary)
+    );
 
-    const embed = createLeaderboardEmbed(users, 1);
-
+    const embed = await createLeaderboardEmbed(users, 1);
     if (!boardMessage) {
       await leaderboardChannel.send({ embeds: [embed], components: [buttons] });
     } else {
@@ -146,43 +142,40 @@ client.once('ready', async () => {
   }
 });
 
-// Invite tracking on member join
+// ---- Invite Tracking ----
 client.on('guildMemberAdd', async member => {
   try {
-    const cachedInvites = client.inviteCache.get(member.guild.id);
+    const cachedInvites = client.inviteCache.get(member.guild.id) || new Map();
     const newInvites = await member.guild.invites.fetch();
 
-    const usedInvite = newInvites.find(i => {
-      const oldUses = cachedInvites.get(i.code)?.uses ?? 0;
-      return i.uses > oldUses;
-    });
+    const usedInvite = newInvites.find(inv => (cachedInvites.get(inv.code) || 0) < inv.uses);
+    client.inviteCache.set(member.guild.id, new Map(newInvites.map(inv => [inv.code, inv.uses])));
 
-    if (!usedInvite) return;
-
-    client.inviteCache.set(member.guild.id, newInvites);
-    const inviterId = usedInvite.inviter?.id;
-
-    if (!inviterId) return;
+    if (!usedInvite?.inviter) return;
+    const inviterId = usedInvite.inviter.id;
 
     let userData = await User.findOne({ userId: inviterId });
     if (!userData) {
       userData = new User({ userId: inviterId });
     }
 
+    // Update and save username in DB
+    userData.username = usedInvite.inviter.tag;
     userData.invites++;
     userData.calculateTotalEarnings();
     await userData.save();
+
+    console.log(`+1 invite for ${usedInvite.inviter.tag}`);
   } catch (error) {
     console.error('Error processing guildMemberAdd:', error);
   }
 });
 
-// Interaction handling for commands and buttons
+// ---- Interaction Handling ----
 client.on('interactionCreate', async interaction => {
   if (interaction.isChatInputCommand()) {
     const command = client.commands.get(interaction.commandName);
     if (!command) return;
-
     try {
       await command.execute(interaction);
     } catch (error) {
@@ -202,24 +195,17 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// --- Express Server for Admin Panel ---
-
+// ---- Express Admin Panel ----
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
-
-// Serve static admin panel frontend files from 'public'
 app.use(express.static(path.join(__dirname, 'public')));
 
-// API endpoint to get user stats by userId
 app.get('/api/user/:userId', async (req, res) => {
   try {
-    const userId = req.params.userId;
-    const userData = await User.findOne({ userId });
+    const userData = await User.findOne({ userId: req.params.userId });
     if (!userData) return res.status(404).json({ error: 'User not found' });
-
     userData.calculateTotalEarnings();
-
     res.json({
       userId: userData.userId,
       invites: userData.invites,
@@ -231,11 +217,8 @@ app.get('/api/user/:userId', async (req, res) => {
   }
 });
 
-// Additional API routes for updating invites, bonuses, resetting users etc. can be added here
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Admin panel web server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Admin panel web server running on port ${PORT}`));
 
+// ---- Login ----
 client.login(config.token);
