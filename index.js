@@ -109,6 +109,10 @@ client.once('ready', async () => {
         description += `${medal} ${userData.username || 'Unknown#0000'}\nInvites: ${userData.invites}\nBonus: $${userData.bonus.toFixed(2)}\n💰 Total Earnings: $${userData.totalEarnings.toFixed(2)}\n\n`;
       });
 
+      if (!description || description.trim().length === 0) {
+        description = 'No leaderboard data available.';
+      }
+
       return new EmbedBuilder()
         .setTitle('REWARD NETWORK | INVITE LEADERBOARD')
         .setColor('Green')
